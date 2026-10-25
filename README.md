@@ -24,3 +24,23 @@ Re-importing is safe: highlights are deduped by their text.
 
 Static files, no build step. Serve the folder from any static host over HTTPS (GitHub Pages, Vercel, Netlify, Cloudflare Pages).
 When you change files, bump `VERSION` in `sw.js` so installed copies update.
+
+## Cloud sync + automatic X bookmarks
+
+Optional: without signing in, the app stays fully local. Signed in, highlights sync across devices and new X bookmarks arrive weekly with no action from you.
+
+```
+pg_cron (Mondays 09:17 UTC) → sync-x edge function → X API (your bookmarks) → highlights table ⇄ the app on each device
+```
+
+Live setup (Supabase project `marginalia`, ref `ztzxhzmbxgaxrmphenrp`, Sydney):
+
+1. **Database**: `supabase/migrations/` creates the tables, row-level security, and the weekly pg_cron job.
+   The cron authenticates with a random secret generated inside the database vault.
+2. **Edge functions** `x-connect` and `sync-x`, deployed with JWT verification off (they check auth themselves).
+   Function secrets: `X_CLIENT_ID`, `X_CLIENT_SECRET`, `APP_URL`.
+3. **X developer app** (developer.x.com, pay-per-use): OAuth 2.0, type *Web App (confidential client)*,
+   callback URL `https://ztzxhzmbxgaxrmphenrp.supabase.co/functions/v1/x-connect`.
+4. In the app: Settings → create account → **Connect X**.
+
+The first connection backfills your bookmarks (X returns up to the ~800 most recent). After that each run stops as soon as it reaches bookmarks it already has, so a weekly run costs about a cent.
