@@ -6,6 +6,7 @@ import { admin, cors, json, syncUser, tokenRequest, userFrom } from '../_shared/
 const b64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const random = (n: number) => b64url(crypto.getRandomValues(new Uint8Array(n)));
 const redirectUri = () => `${Deno.env.get('SUPABASE_URL')}/functions/v1/x-connect`;
+const appUrl = () => Deno.env.get('APP_URL') ?? 'https://marginalia-wheat-eight.vercel.app/';
 
 Deno.serve(async req => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: cors });
@@ -33,7 +34,7 @@ Deno.serve(async req => {
   }
 
   const params = new URL(req.url).searchParams;
-  const back = (result: string) => Response.redirect(`${Deno.env.get('APP_URL')}?x=${encodeURIComponent(result)}#settings`, 302);
+  const back = (result: string) => Response.redirect(`${appUrl()}?x=${encodeURIComponent(result)}#settings`, 302);
   const state = params.get('state') ?? '';
   const { data: pending } = await db.from('x_oauth_states').delete().eq('state', state).select().maybeSingle();
   if (!pending) return back('expired');

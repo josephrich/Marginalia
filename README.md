@@ -22,6 +22,9 @@ Re-importing is safe: highlights are deduped by their text.
 
 ## Hosting
 
+Live at **https://marginalia-wheat-eight.vercel.app** (Vercel, auto-deploys on push to `main`).
+
+
 Static files, no build step. Serve the folder from any static host over HTTPS (GitHub Pages, Vercel, Netlify, Cloudflare Pages).
 When you change files, bump `VERSION` in `sw.js` so installed copies update.
 
@@ -38,7 +41,7 @@ Live setup (Supabase project `marginalia`, ref `ztzxhzmbxgaxrmphenrp`, Sydney):
 1. **Database**: `supabase/migrations/` creates the tables, row-level security, and the weekly pg_cron job.
    The cron authenticates with a random secret generated inside the database vault.
 2. **Edge functions** `x-connect` and `sync-x`, deployed with JWT verification off (they check auth themselves).
-   Function secrets: `X_CLIENT_ID`, `X_CLIENT_SECRET`, `APP_URL`.
+   Function secrets: `X_CLIENT_ID`, `X_CLIENT_SECRET` (and optionally `APP_URL`; defaults to the Vercel URL).
 3. **X developer app** (developer.x.com, pay-per-use): OAuth 2.0, type *Web App (confidential client)*,
    callback URL `https://ztzxhzmbxgaxrmphenrp.supabase.co/functions/v1/x-connect`.
 4. In the app: Settings → create account → **Connect X**.
