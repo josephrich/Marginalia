@@ -1,7 +1,7 @@
 // Bump VERSION whenever app files change so phones pick up the update.
-const VERSION = 'marginalia-v1';
+const VERSION = 'marginalia-v2';
 const FILES = [
-  './', './index.html', './styles.css', './app.js', './db.js', './importers.js', './manifest.json',
+  './', './index.html', './styles.css', './app.js', './db.js', './importers.js', './sync.js', './config.js', './manifest.json',
   './bookmarklets/x.js', './bookmarklets/kindle.js',
   './icons/icon-192.png', './icons/apple-touch-icon.png',
 ];

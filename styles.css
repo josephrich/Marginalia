@@ -78,7 +78,7 @@ main { max-width: 680px; margin: 0 auto; padding: 8px 16px 24px; }
 .btn.small { padding: 8px 12px; font-size: 14px; }
 .btn.block { width: 100%; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; }
-input[type=search], input[type=text], input[type=url], textarea, select {
+input[type=search], input[type=text], input[type=url], input[type=email], input[type=password], textarea, select {
   width: 100%; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); outline: none;
 }
 input:focus, textarea:focus, select:focus { border-color: var(--accent); }

@@ -1,5 +1,6 @@
 import * as db from './db.js';
 import { parseFile, parseText, idFor } from './importers.js';
+import * as cloud from './sync.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const view = $('#view');
@@ -13,8 +14,9 @@ const store = {
 };
 
 let settings = { dailyCount: 10, sources: { kindle: true, twitter: true, other: true }, ...store.get('settings', {}) };
-let items = [];
-let byId = new Map();
+let items = [];        // live highlights
+let byId = new Map();  // every record, including deleted tombstones (kept so deletes sync)
+const refresh = () => { items = [...byId.values()].filter(h => !h.deleted); };
 
 const icons = {
   heart: '<svg viewBox="0 0 24 24"><path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/></svg>',
@@ -45,14 +47,38 @@ const where = h => [h.page ? `p. ${h.page}` : '', h.location ? `loc. ${h.locatio
 
 // ---------- Data ----------
 async function load() {
-  items = await db.getAll();
-  byId = new Map(items.map(h => [h.id, h]));
+  byId = new Map((await db.getAll()).map(h => [h.id, h]));
+  refresh();
 }
 
 async function save(...hs) {
   hs.forEach(h => { h.updatedAt = Date.now(); byId.set(h.id, h); });
-  items = [...byId.values()];
+  refresh();
   await db.putMany(hs);
+  scheduleSync();
+}
+
+// ---------- Cloud sync ----------
+let syncing = null;
+function scheduleSync(delay = 3000) {
+  if (!cloud.enabled || !cloud.user()) return;
+  clearTimeout(scheduleSync.t);
+  scheduleSync.t = setTimeout(runSync, delay);
+}
+async function runSync() {
+  if (!cloud.enabled || !cloud.user() || !navigator.onLine) return;
+  if (syncing) return syncing;
+  syncing = cloud.sync(byId, async recs => {
+    recs.forEach(h => byId.set(h.id, h));
+    await db.putMany(recs);
+    refresh();
+  }).then(r => {
+    store.set('lastSync', Date.now());
+    // Refresh the screen in place, but never under an open editor or mid-review card.
+    if (r.pulled && !sheet.open && ((location.hash || '#review') !== '#review' || !$('.qcard'))) (routes[location.hash.slice(1)] || renderReview)();
+    return r;
+  }).catch(e => { console.warn('sync failed', e); throw e; }).finally(() => { syncing = null; });
+  return syncing;
 }
 
 async function ingest(list, { restore = false } = {}) {
@@ -63,14 +89,14 @@ async function ingest(list, { restore = false } = {}) {
     const text = String(raw.text || '').trim();
     if (!text) continue;
     const id = raw.id && restore ? raw.id : idFor({ text });
-    const ex = byId.get(id);
+    const ex = byId.get(id)?.deleted ? null : byId.get(id);
     const src = ['kindle', 'twitter', 'other'].includes(raw.source) ? raw.source : 'other';
     if (!ex) {
       const h = {
         id, text, title: raw.title || '', author: raw.author || '', source: src, url: raw.url || '', note: raw.note || '',
         location: raw.location ?? null, page: raw.page ?? null, highlightedAt: raw.highlightedAt ?? null,
         addedAt: raw.addedAt ?? now, favorite: !!raw.favorite, discarded: !!raw.discarded,
-        lastSeen: raw.lastSeen ?? null, seenCount: raw.seenCount ?? 0,
+        lastSeen: raw.lastSeen ?? null, seenCount: raw.seenCount ?? 0, updatedAt: now,
       };
       byId.set(id, h); changed.push(h); added++;
     } else {
@@ -78,11 +104,11 @@ async function ingest(list, { restore = false } = {}) {
       const before = JSON.stringify(ex);
       if (restore) Object.assign(ex, raw, { id });
       else for (const k of ['title', 'author', 'url', 'note', 'location', 'page', 'highlightedAt']) if (!ex[k] && raw[k]) ex[k] = raw[k];
-      if (JSON.stringify(ex) !== before) { changed.push(ex); updated++; }
+      if (JSON.stringify(ex) !== before) { ex.updatedAt = now; changed.push(ex); updated++; }
     }
   }
-  items = [...byId.values()];
-  if (changed.length) await db.putMany(changed);
+  refresh();
+  if (changed.length) { await db.putMany(changed); scheduleSync(500); }
   return { added, updated, skipped: list.length - added - updated };
 }
 
@@ -117,7 +143,8 @@ function pick(n, exclude = new Set()) {
 
 function daily() {
   let d = store.get('daily');
-  if (!d || d.date !== dayKey()) d = { date: dayKey(), ids: pick(settings.dailyCount), pos: 0 };
+  // Re-pick if the day changed, or if today's set was drawn before any highlights had synced in.
+  if (!d || d.date !== dayKey() || (!d.ids.length && items.length)) d = { date: dayKey(), ids: pick(settings.dailyCount), pos: 0 };
   d.ids = d.ids.filter(id => byId.has(id) && !byId.get(id).discarded);
   d.pos = Math.min(d.pos, d.ids.length);
   store.set('daily', d);
@@ -244,8 +271,8 @@ function openEditor(h, after) {
         toast(v === 'toggle' ? (h.discarded ? 'Discarded' : 'Restored') : 'Saved');
       }
     } else if (v === 'delete' && confirm('Delete this highlight permanently?')) {
-      byId.delete(h.id); items = [...byId.values()];
-      await db.remove(h.id);
+      h.deleted = true;
+      await save(h);
       toast('Deleted');
     }
     sheet.returnValue = '';
@@ -288,6 +315,7 @@ function filtered() {
 
 function renderResults() {
   const box = $('#results');
+  if (!box) return; // the editor can close after the user has left the Library tab
   const list = filtered();
   if (lib.mode === 'books' && lib.book == null) {
     const groups = new Map();
@@ -442,6 +470,8 @@ async function renderSettings() {
       <label class="toggle">Include other <input type="checkbox" data-src="other" ${settings.sources.other ? 'checked' : ''}></label>
       <div class="row"><button class="btn ghost small" id="reshuffle">Reshuffle today's set</button></div></div>
 
+    <div class="sec" id="syncSec"></div>
+
     <div class="sec"><h3>Backup</h3>
       <p>Everything is stored only on this device. Back it up now and then, or use the backup to move to a new phone: import the file on the Import tab.
       ${persisted === false ? '<br>⚠️ Your browser may clear this storage. Add the app to your Home Screen to keep it.' : ''}</p>
@@ -451,6 +481,7 @@ async function renderSettings() {
       <div class="row"><button class="btn danger" id="wipe">Delete all highlights</button></div></div>
     <p class="hint">Marginalia: your highlights, on your own device. No account, no server, no subscription.</p>`;
 
+  renderSyncSection();
   $('#count').onchange = e => { settings.dailyCount = +e.target.value; store.set('settings', settings); store.set('daily', null); toast('Takes effect on the next reshuffle'); };
   view.querySelectorAll('[data-src]').forEach(c => c.onchange = () => { settings.sources[c.dataset.src] = c.checked; store.set('settings', settings); store.set('daily', null); });
   $('#reshuffle').onclick = () => { store.set('daily', null); location.hash = '#review'; };
@@ -458,9 +489,97 @@ async function renderSettings() {
   $('#exMd').onclick = () => download(`marginalia-${dayKey()}.md`, toMarkdown(), 'text/markdown');
   $('#wipe').onclick = async () => {
     if (!confirm(`Delete all ${items.length} highlights from this device? Export a backup first if unsure.`)) return;
-    await db.clearAll(); items = []; byId.clear(); store.set('daily', null);
+    items.forEach(h => { h.deleted = true; });
+    await save(...items); store.set('daily', null);
     toast('All highlights deleted'); renderSettings();
   };
+}
+
+// ---------- Sync settings ----------
+const ago = t => {
+  if (!t) return 'never';
+  const m = Math.round((Date.now() - new Date(t)) / 60000);
+  return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+};
+
+async function renderSyncSection() {
+  const box = $('#syncSec');
+  if (!box) return;
+  if (!cloud.enabled) {
+    box.innerHTML = `<h3>☁️ Sync &amp; X bookmarks</h3><p>Not set up. Add your Supabase URL and key to <code>config.js</code> to sync between devices and pull X bookmarks automatically.</p>`;
+    return;
+  }
+  const u = cloud.user();
+  if (!u) {
+    box.innerHTML = `<h3>☁️ Sync &amp; X bookmarks</h3>
+      <p>Sign in to sync between devices and pull your X bookmarks automatically every week.</p>
+      <form id="authForm">
+        <label class="f">Email</label><input type="email" name="email" autocomplete="email" autocapitalize="off" required>
+        <label class="f">Password</label><input type="password" name="password" autocomplete="current-password" minlength="6" required>
+        <div class="row"><button class="btn" value="in">Sign in</button><button class="btn ghost" value="up">Create account</button></div>
+      </form>`;
+    $('#authForm').onsubmit = async e => {
+      e.preventDefault();
+      const f = new FormData(e.target), email = f.get('email').trim(), pw = f.get('password');
+      try {
+        if (e.submitter?.value === 'up') {
+          if (!(await cloud.signUp(email, pw))) return toast('Check your email to confirm, then sign in here');
+        } else await cloud.signIn(email, pw);
+        toast('Signed in, syncing…');
+        await runSync();
+        renderSettings();
+      } catch (err) { toast(err.message); }
+    };
+    return;
+  }
+
+  box.innerHTML = `<h3>☁️ Sync</h3>
+    <p>Signed in as <b>${esc(u.email)}</b> · last synced ${ago(store.get('lastSync'))}</p>
+    <div class="row"><button class="btn ghost small" id="syncNow">Sync now</button><button class="btn ghost small" id="signOut">Sign out</button></div>
+    <h3 style="margin-top:18px">𝕏 Bookmarks</h3><div id="xBox"><p>Checking…</p></div>`;
+  $('#syncNow').onclick = async () => {
+    try { const r = await runSync(); toast(r ? `Synced: ${r.pulled} in, ${r.pushed} out` : 'Offline'); renderSettings(); } catch (e) { toast(e.message); }
+  };
+  $('#signOut').onclick = () => { cloud.signOut(); toast('Signed out. Highlights stay on this device'); renderSettings(); };
+
+  const xBox = $('#xBox');
+  try {
+    const x = await cloud.xStatus();
+    if (!x) {
+      xBox.innerHTML = `<p>Connect once and new bookmarks arrive automatically every week.</p>
+        <div class="row"><button class="btn" id="xConnect">Connect X</button></div>`;
+      $('#xConnect').onclick = () => cloud.xConnect().catch(e => toast(e.message));
+      return;
+    }
+    xBox.innerHTML = `<p>Connected as <b>@${esc(x.x_username)}</b> · last checked ${ago(x.last_sync_at)}${x.last_sync_at ? ` (${x.last_sync_added ?? 0} new)` : ' (first import running)'}</p>
+      ${x.last_error ? `<p style="color:var(--heart)">Last sync failed: ${esc(x.last_error)}</p>` : ''}
+      <div class="row"><button class="btn ghost small" id="xNow">Check X now</button><button class="btn ghost small" id="xOff">Disconnect</button></div>`;
+    $('#xNow').onclick = async () => {
+      toast('Checking X…');
+      try {
+        const { results } = await cloud.xSyncNow();
+        if (results[0]?.error) throw new Error(results[0].error);
+        await runSync();
+        toast(`${results[0]?.added ?? 0} new bookmarks`);
+        renderSettings();
+      } catch (e) { toast(e.message); }
+    };
+    $('#xOff').onclick = async () => {
+      if (!confirm('Stop pulling X bookmarks? Already imported ones stay.')) return;
+      await cloud.xDisconnect(); renderSettings();
+    };
+  } catch (e) {
+    xBox.innerHTML = `<p>Couldn't reach the server: ${esc(e.message)}</p>`;
+  }
+}
+
+function handleXReturn() {
+  const p = new URLSearchParams(location.search);
+  const x = p.get('x');
+  if (!x) return;
+  history.replaceState(null, '', location.pathname + location.hash);
+  toast({ connected: 'X connected. Importing your bookmarks…', denied: 'X connection cancelled', expired: 'That took too long, please try again', failed: 'Connecting X failed, please try again' }[x] || x);
+  if (x === 'connected') setTimeout(() => runSync().catch(() => {}), 8000);
 }
 
 // ---------- Router ----------
@@ -489,5 +608,9 @@ function handleShareTarget() {
 await load();
 route();
 handleShareTarget();
+handleXReturn();
+runSync().catch(() => {});
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') runSync().catch(() => {}); });
+window.addEventListener('online', () => runSync().catch(() => {}));
 navigator.storage?.persist?.();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
